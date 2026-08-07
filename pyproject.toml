@@ -14,7 +14,7 @@ ignore_missing_imports = true
 
 [tool.poetry]
 name = "volttron-lib-modbus-driver"
-version = "0.1.0"
+version = "2.0.0rc0"
 description = "Modbus driver supported and maintained by the Volttron team."
 authors = ["Mark Bonicillo <volttron@pnnl.gov>"]
 license = "Apache-2.0"
@@ -33,12 +33,11 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.10"
-volttron-lib-base-driver="^0.2.1rc0"
-pymodbus = "^2.5.3"
+python = ">=3.10,<4.0"
+volttron-lib-base-driver = { path = "../volttron-lib-base-driver", develop = true }
+pymodbus = "^3.7.2"
 
 [tool.poetry.group.dev.dependencies]
-volttron-testing = "^0.3.1a9"
 pytest = "^6.2.5"
 pytest-cov = "^3.0.0"
 modbus-tk= "^1.1.2"

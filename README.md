@@ -1,8 +1,7 @@
 # volttron-lib-modbus-driver
 
-[![Eclipse VOLTTRON™](https://img.shields.io/badge/Eclips%20VOLTTRON--red.svg)](https://volttron.readthedocs.io/en/latest/)
+[![Eclipse VOLTTRON™](https://img.shields.io/badge/Eclips%20VOLTTRON--red.svg)](https://eclipse-volttron.readthedocs.io/en/latest/)
 ![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)
-![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
 ![Passing?](https://github.com/VOLTTRON/volttron-lib-modbus-driver/actions/workflows/run-tests.yml/badge.svg)
 [![pypi version](https://img.shields.io/pypi/v/volttron-lib-modbus-driver.svg)](https://pypi.org/project/volttron-lib-modbus-driver/)
 
@@ -13,12 +12,12 @@
 ## Requires
 
 * python >=3.10
-* volttron-lib-base-driver
-* pymodbus >= 2.3.5
+* volttron-lib-base-driver >= 2.0.0rc0
+* pymodbus >= 3.7.2
 
 
 # Documentation
-More detailed documentation can be found on [ReadTheDocs](https://volttron.readthedocs.io/en/modular/). The RST source
+More detailed documentation can be found on [ReadTheDocs](https://eclipse-volttron.readthedocs.io/en/latest/external-docs/volttron-lib-modbus-driver_docs_root/docs/source/index.html#modbus-driver). The RST source
 of the documentation for this component is located in the "docs" directory of this repository.
 
 
@@ -31,13 +30,13 @@ Information on how to install of the VOLTTRON platform can be found
 1. If it is not already, install the VOLTTRON Platform Driver Agent:
 
     ```shell
-    vctl install volttron-platform-driver --vip-identity platform.driver --start
+    vctl install volttron-platform-driver --vip-identity platform.driver
     ```
 
 2. Install the volttron-lib-modbus-driver library.
 
     ```shell
-    pip install volttron-lib-modbus-driver
+    poetry add --directory $VOLTTRON_HOME volttron-lib-modbus-driver
     ```
 
 3. Store device and registry files for the Modbus device to the Platform Driver configuration store:
@@ -58,7 +57,7 @@ Information on how to install of the VOLTTRON platform can be found
     {
         "driver_config": {"device_address": "10.0.0.4"},
         "driver_type": "modbus",
-        "registry_config":"config://catalyst371.csv",
+        "registry_config":"config://modbus.csv",
         "interval": 120,
         "timezone": "UTC",
         "campus": "campus",
@@ -143,7 +142,7 @@ Information on how to install of the VOLTTRON platform can be found
 
 Please see the following for contributing guidelines [contributing](https://github.com/eclipse-volttron/volttron-core/blob/develop/CONTRIBUTING.md).
 
-Please see the following helpful guide about [developing modular VOLTTRON agents](https://github.com/eclipse-volttron/volttron-core/blob/develop/DEVELOPING_ON_MODULAR.md)
+Please see the following helpful guide about [developing modular VOLTTRON agents](https://eclipse-volttron.readthedocs.io/en/latest/developing-volttron/developing-agents/agent-development.html)
 
 
 # Disclaimer Notice

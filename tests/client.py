@@ -54,7 +54,6 @@ import modbus_tk.defines as modbus_constants
 import modbus_tk.modbus_rtu as modbus_rtu
 import modbus_tk.modbus_tcp as modbus_tcp
 import serial
-import six.moves    # type: ignore
 from modbus_tk.exceptions import ModbusError
 
 from . import helpers
@@ -477,7 +476,7 @@ class Request:
                         results = (results, )
             # Everything else))
             field_values = collections.OrderedDict([
-                (field, Datum(value, now)) for field, value in six.moves.zip(self.fields, results)
+                (field, Datum(value, now)) for field, value in zip(self.fields, results)
             ])
         return field_values
 
@@ -645,7 +644,7 @@ class Client:
 
     def pprint(self):
         response = "pending writes: \n"
-        for f, v in six.iteritems(self._pending_writes):
+        for f, v in self._pending_writes.items():
             response = response + "\t{0} : {1}".format(f, v)
         return response
 
@@ -702,7 +701,7 @@ class Client:
         self.read_all()
         return [(f, f.transform_value(Field.convert_mixed(f.type, d.value), self)
                  if f.mixed else f.transform_value(d.value, self), d.timestamp)
-                for f, d in six.iteritems(self._data)]
+                for f, d in self._data.items()]
 
     def write_all(self):
         logger.debug("In write_all")

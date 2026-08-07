@@ -25,14 +25,16 @@
 import logging
 import struct
 
+from collections.abc import KeysView
 from gevent import monkey
 
 monkey.patch_socket()
 
 from contextlib import closing, contextmanager
+from pydantic import constr, Field, TypeAdapter, ValidationError
+from pydantic.networks import IPvAnyAddress
 
-from pymodbus.client.sync import ModbusTcpClient as SyncModbusClient
-from pymodbus.constants import Defaults
+from pymodbus.client.tcp import ModbusTcpClient as SyncModbusClient
 from pymodbus.exceptions import ConnectionException, ModbusException, ModbusIOException
 from pymodbus.pdu import ExceptionResponse
 from volttron.driver.base.driver_locks import socket_lock
@@ -42,10 +44,35 @@ from volttron.driver.base.interfaces import (
     BasicRevert,
     DriverInterfaceError,
 )
-from volttron.utils.logs import setup_logging
+from volttron.driver.base.config import PointConfig, RemoteConfig
 
-setup_logging()
+
 _log = logging.getLogger(__name__)
+
+
+class ModbusRemoteConfig(RemoteConfig):
+    ip_address: IPvAnyAddress = Field(alias='device_address')
+    port: int = Field(ge=0, default=502)
+    unit_id: int = Field(ge=0, default=0, alias='slave_id')
+
+
+class ModbusPointConfig(PointConfig):
+    default_value_configured: constr(strip_whitespace=True) | None = Field(default=None, alias='Default Value')
+    io_type: constr(to_lower=True, strip_whitespace=True) = Field(alias='Modbus Register')
+    mixed_endian: bool = Field(default=False, alias='Mixed Endian')
+    point_address: int = Field(alias='Point Address')
+
+    @property
+    def default_value(self) -> any:
+        if self.writable and self.default_value_configured:
+            try:
+                ta = TypeAdapter(bool) if self.io_type == 'bool' else TypeAdapter(self.python_type)
+                return ta.validate_python(self.default_value_configured)
+            except ValidationError:
+                _log.warning(f'Using default revert method for {self.volttron_point_name} --- bad default value: {e}.')
+                return None
+        else:
+            return None
 
 
 class ModbusInterfaceException(ModbusException):
@@ -58,37 +85,41 @@ class ModbusRegisterBase(BaseRegister):
                  address,
                  register_type,
                  read_only,
-                 pointName,
+                 point_name,
                  units,
                  description='',
-                 slave_id=0):
+                 unit_id=0,
+                 default_value=None):
         super(ModbusRegisterBase, self).__init__(register_type,
                                                  read_only,
-                                                 pointName,
+                                                 point_name,
                                                  units,
                                                  description=description)
         self.address = address
-        self.slave_id = slave_id
+        self.default_value = default_value
+        self.unit_id = unit_id
 
 
 class ModbusBitRegister(ModbusRegisterBase):
 
     def __init__(self,
                  address,
-                 type_string,
-                 pointName,
+                 _,
+                 point_name,
                  units,
                  read_only,
-                 mixed_endian=False,
+                 __,
                  description='',
-                 slave_id=0):
+                 unit_id=0,
+                 default_value=None):
         super(ModbusBitRegister, self).__init__(address,
                                                 "bit",
                                                 read_only,
-                                                pointName,
+                                                point_name,
                                                 units,
                                                 description=description,
-                                                slave_id=slave_id)
+                                                unit_id=unit_id,
+                                                default_value=default_value)
 
         self.python_type = bool
 
@@ -97,19 +128,20 @@ class ModbusBitRegister(ModbusRegisterBase):
         index = (self.address - starting_address)
         return bit_stream[index]
 
-    def get_register_count(self):
+    @staticmethod
+    def get_register_count():
         return 1
 
     def get_state(self, client):
-        response_bits = client.read_discrete_inputs(self.address, unit=self.slave_id) if self.read_only else \
-            client.read_coils(self.address, unit=self.slave_id)
+        response_bits = client.read_discrete_inputs(self.address, slave=self.unit_id) if self.read_only else \
+            client.read_coils(self.address, slave=self.unit_id)
         if response_bits is None:
             raise ModbusInterfaceException("pymodbus returned None")
         return response_bits.bits[0]
 
     def set_state(self, client, value):
         if not self.read_only:
-            response = client.write_coil(self.address, value, unit=self.slave_id)
+            response = client.write_coil(self.address, value, slave=self.unit_id)
             if response is None:
                 raise ModbusInterfaceException("pymodbus returned None")
             if isinstance(response, ExceptionResponse):
@@ -123,25 +155,27 @@ class ModbusByteRegister(ModbusRegisterBase):
     def __init__(self,
                  address,
                  type_string,
-                 pointName,
+                 point_name,
                  units,
                  read_only,
                  mixed_endian=False,
                  description='',
-                 slave_id=0):
+                 unit_id=0,
+                 default_value=None):
         super(ModbusByteRegister, self).__init__(address,
                                                  "byte",
                                                  read_only,
-                                                 pointName,
+                                                 point_name,
                                                  units,
                                                  description=description,
-                                                 slave_id=slave_id)
+                                                 unit_id=unit_id,
+                                                 default_value=default_value)
 
         try:
             self.parse_struct = struct.Struct(type_string)
         except struct.error:
             raise ValueError("Invalid Modbus Register '" + type_string + "' for point " +
-                             pointName)
+                             point_name)
 
         struct_types = [
             type(x) for x in self.parse_struct.unpack(b'\x00' * self.parse_struct.size)
@@ -149,7 +183,7 @@ class ModbusByteRegister(ModbusRegisterBase):
 
         if len(struct_types) != 1:
             raise ValueError("Invalid length Modbus Register '" + type_string + "' for point " +
-                             pointName)
+                             point_name)
 
         self.python_type = struct_types[0]
 
@@ -181,23 +215,19 @@ class ModbusByteRegister(ModbusRegisterBase):
                 register_values.extend(self.pymodbus_register_struct.unpack_from(target_bytes, i))
             register_values.reverse()
 
-            target_bytes = ""
             target_bytes = bytes.join(
                 b'', [self.pymodbus_register_struct.pack(value) for value in register_values])
-            # for value in register_values:
-            #     target_bytes += PYMODBUS_REGISTER_STRUCT.pack(value).decode('utf-8')
-
         return self.parse_struct.unpack(target_bytes)[0]
 
     def get_state(self, client):
         if self.read_only:
             response = client.read_input_registers(self.address,
                                                    self.get_register_count(),
-                                                   unit=self.slave_id)
+                                                   slave=self.unit_id)
         else:
             response = client.read_holding_registers(self.address,
                                                      self.get_register_count(),
-                                                     unit=self.slave_id)
+                                                     slave=self.unit_id)
 
         if response is None:
             raise ModbusInterfaceException("pymodbus returned None")
@@ -217,15 +247,19 @@ class ModbusByteRegister(ModbusRegisterBase):
                 register_values.extend(self.pymodbus_register_struct.unpack_from(value_bytes, i))
             if self.mixed_endian:
                 register_values.reverse()
-            client.write_registers(self.address, register_values, unit=self.slave_id)
+            client.write_registers(self.address, register_values, slave=self.unit_id)
             return self.get_state(client)
         return None
 
 
 class Modbus(BasicRevert, BaseInterface):
 
-    def __init__(self, **kwargs):
-        super(Modbus, self).__init__(**kwargs)
+    INTERFACE_CONFIG_CLASS = ModbusRemoteConfig
+    REGISTER_CONFIG_CLASS = ModbusPointConfig
+
+    def __init__(self, config: ModbusRemoteConfig, *args, **kwargs):
+        BasicRevert.__init__(self, **kwargs)
+        BaseInterface.__init__(self, config, *args, **kwargs)
         self.register_ranges = {
             ('byte', True): [],
             ('byte', False): [],
@@ -235,26 +269,32 @@ class Modbus(BasicRevert, BaseInterface):
         self.modbus_read_max = 100
 
     ##### Implemented abstract methods from BaseInterface
-
-    def configure(self, config_dict, registry_config_str):
-        self.slave_id = config_dict.get("slave_id", 0)
-        self.ip_address = config_dict["device_address"]
-        self.port = config_dict.get("port", Defaults.Port)
-        self.parse_config(registry_config_str)
-
-    def get_point(self, point_name):
-        register = self.get_register_by_name(point_name)
-        with self.modbus_client(self.ip_address, self.port) as client:
+    
+    def get_point(self, topic, **kwargs):
+        register: ModbusBitRegister | ModbusByteRegister = self.get_register_by_name(topic)
+        with self.modbus_client(str(self.config.ip_address), self.config.port) as client:
             try:
                 result = register.get_state(client)
             except (ConnectionException, ModbusIOException, ModbusInterfaceException):
                 result = None
         return result
 
-    ##### Overriden methods from BaseInterface
+    ##### Overridden methods from BaseInterface
 
-    def insert_register(self, register):
-        super(Modbus, self).insert_register(register)
+    def create_register(self, register_definition: ModbusPointConfig) -> ModbusBitRegister | ModbusByteRegister:
+        klass = ModbusBitRegister if register_definition.io_type.lower() == 'bool' else ModbusByteRegister
+        return klass(register_definition.point_address,
+                         register_definition.io_type,
+                         register_definition.volttron_point_name,
+                         register_definition.units,
+                         not register_definition.writable,
+                         mixed_endian=register_definition.mixed_endian,
+                         description=register_definition.notes,
+                         unit_id=self.config.unit_id,
+                         default_value=register_definition.default_value)
+
+    def insert_register(self, register: ModbusBitRegister | ModbusByteRegister, base_topic: str):
+        super(Modbus, self).insert_register(register, base_topic)
 
         # MODBUS requires extra bookkeeping.
         register_type = register.get_register_type()
@@ -265,39 +305,45 @@ class Modbus(BasicRevert, BaseInterface):
         start, end = register.address, register.address + register_count - 1
         register_range.append([start, end, [register]])
 
-    ##### Uses implementation from BasicRevert for following BaseInterface abstract methods:
-    ##### set_point, scrape_all, revert_all, revert_point
+        if register.default_value is not None:
+            self.set_default('/'.join([base_topic, register.point_name]), register.default_value)
 
-    ##### Implemented abstract methods from BasicRevert
+    def finalize_setup(self, initial_setup: bool = False):
+        # Merge adjacent ranges for efficiency.
+        self.merge_register_ranges()
 
-    def _set_point(self, point_name, value):
-        register = self.get_register_by_name(point_name)
+
+    ##### Implemented abstract methods from BasicRevert (set_point, scrape_all, revert_all, revert_point)
+
+    def _set_point(self, topic, value):
+        register: ModbusBitRegister | ModbusByteRegister = self.get_register_by_name(topic)
         if register.read_only:
-            raise IOError("Trying to write to a point configured read only: " + point_name)
+            raise IOError("Trying to write to a point configured read only: " + topic)
 
-        with self.modbus_client(self.ip_address, self.port) as client:
+        with self.modbus_client(str(self.config.ip_address), self.config.port) as client:
             try:
                 result = register.set_state(client, value)
             except (ConnectionException, ModbusIOException, ModbusInterfaceException) as ex:
                 raise IOError("Error encountered trying to write to point {}: {}".format(
-                    point_name, ex))
+                    topic, ex))
         return result
 
-    def _scrape_all(self):
+    def _get_multiple_points(self, topics: KeysView[str], **kwargs) -> (dict, dict):
         result_dict = {}
-        with self.modbus_client(self.ip_address, self.port) as client:
+        with self.modbus_client(str(self.config.ip_address), self.config.port) as client:
             try:
-
                 result_dict.update(self.scrape_byte_registers(client, True))
                 result_dict.update(self.scrape_byte_registers(client, False))
 
                 result_dict.update(self.scrape_bit_registers(client, True))
                 result_dict.update(self.scrape_bit_registers(client, False))
             except (ConnectionException, ModbusIOException, ModbusInterfaceException) as e:
-                raise DriverInterfaceError("Failed to scrape device at " + self.ip_address + ":" +
-                                           str(self.port) + " ID: " + str(self.slave_id) + str(e))
-
-        return result_dict
+                raise DriverInterfaceError("Failed to scrape device at " + str(self.config.ip_address) + ":" +
+                                           str(self.config.port) + " ID: " + str(self.config.unit_id) + str(e))
+        # TODO: Build a query with just the points we want and pads. Then get rid of this filter.
+        filtered_dict = {topic: result_dict[topic] for topic in topics if topic in result_dict}
+        # TODO: Need error dict, if possible.
+        return filtered_dict, {}
 
     ##### Helper methods
 
@@ -313,7 +359,7 @@ class Modbus(BasicRevert, BaseInterface):
 
             for group in range(start, end + 1, self.modbus_read_max):
                 count = min(end - group + 1, self.modbus_read_max)
-                response = read_func(group, count, unit=self.slave_id)
+                response = read_func(group, count, slave=self.config.unit_id)
                 if response is None:
                     raise ModbusInterfaceException("pymodbus returned None")
                 if isinstance(response, ModbusException):
@@ -342,8 +388,8 @@ class Modbus(BasicRevert, BaseInterface):
 
             for group in range(start, end + 1, self.modbus_read_max):
                 count = min(end - group + 1, self.modbus_read_max)
-                response = client.read_discrete_inputs(group, count, unit=self.slave_id) if read_only else \
-                    client.read_coils(group, count, unit=self.slave_id)
+                response = client.read_discrete_inputs(group, count, slave=self.config.unit_id) if read_only else \
+                    client.read_coils(group, count, slave=self.config.unit_id)
                 if response is None:
                     raise ModbusInterfaceException("pymodbus returned None")
                 if isinstance(response, ModbusException):
@@ -356,65 +402,6 @@ class Modbus(BasicRevert, BaseInterface):
                 result_dict[point] = value
 
         return result_dict
-
-    def parse_config(self, configDict):
-        if configDict is None:
-            return
-
-        for regDef in configDict:
-            # Skip lines that have no address yet.
-            if not regDef['Volttron Point Name']:
-                continue
-
-            io_type = regDef['Modbus Register']
-            bit_register = io_type.lower() == 'bool'
-            read_only = regDef['Writable'].lower() != 'true'
-            point_path = regDef['Volttron Point Name']
-            address = int(regDef['Point Address'])
-            description = regDef.get('Notes', '')
-            units = regDef['Units']
-
-            default_value = regDef.get("Default Value", '').strip()
-
-            mixed_endian = regDef.get('Mixed Endian', '').strip().lower() == 'true'
-
-            klass = ModbusBitRegister if bit_register else ModbusByteRegister
-            register = klass(address,
-                             io_type,
-                             point_path,
-                             units,
-                             read_only,
-                             mixed_endian=mixed_endian,
-                             description=description,
-                             slave_id=self.slave_id)
-
-            self.insert_register(register)
-
-            if not read_only:
-                if default_value:
-                    if isinstance(register, ModbusBitRegister):
-                        try:
-                            value = bool(int(default_value))
-                        except ValueError:
-                            value = default_value.lower().startswith(
-                                't') or default_value.lower() == 'on'
-                        self.set_default(point_path, value)
-                    else:
-                        try:
-                            value = register.python_type(default_value)
-                            self.set_default(point_path, value)
-                        except ValueError:
-                            _log.warning(
-                                "Unable to set default value for {}, bad default value in configuration. "
-                                "Using default revert method.".format(point_path))
-
-                else:
-                    _log.info(
-                        "No default value supplied for point {}. Using default revert method.".
-                        format(point_path))
-
-        # Merge adjacent ranges for efficiency.
-        self.merge_register_ranges()
 
     def merge_register_ranges(self):
         """
@@ -442,5 +429,10 @@ class Modbus(BasicRevert, BaseInterface):
     @contextmanager
     def modbus_client(self, address, port):
         with socket_lock():
-            with closing(SyncModbusClient(address, port)) as client:
+            with closing(SyncModbusClient(address, port=port)) as client:
                 yield client
+
+    @classmethod
+    def unique_remote_id(cls, config_name: str, config: ModbusRemoteConfig) -> tuple:
+        # TODO: This should probably incorporate information which currently belongs to the BACnet Proxy Agent.
+        return str(config.ip_address), config.port
