@@ -2,15 +2,8 @@
 requires = ["poetry-core>=1.2.2"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.mypy]
-show_error_context = true
-pretty = true
-show_column_numbers = true
-show_error_codes = true
-exclude = ['docs/']
-
-[tool.mypy-six.moves]
-ignore_missing_imports = true
+[tool.isort]
+profile = "black"
 
 [tool.poetry]
 name = "volttron-lib-modbus-driver"
@@ -33,25 +26,23 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.10"
-volttron-lib-base-driver="^0.2.1rc0"
-pymodbus = "^2.5.3"
+python = ">=3.10,<4.0"
+protocol-proxy-modbus = ">=2.0.0rc0"
+volttron-lib-base-driver = ">=2.0.0rc6"
 
 [tool.poetry.group.dev.dependencies]
-volttron-testing = "^0.3.1a9"
-pytest = "^6.2.5"
-pytest-cov = "^3.0.0"
-modbus-tk= "^1.1.2"
-pyserial = "^3.5"
-mock = "^4.0.3"
-pre-commit = "^2.17.0"
-yapf = "^0.32.0"
-toml = "^0.10.2"
-mypy = "^0.942"
-coverage = "^6.3.2"
-isort = "^5.10.1"
+#volttron-testing = "^0.3.1a7"
+#pytest = "^6.2.5"
+#pytest-cov = "^3.0.0"
+#mock = "^4.0.3"
+#pre-commit = "^2.17.0"
+#yapf = "^0.32.0"
+#toml = "^0.10.2"
+#mypy = "^0.942"
+#coverage = "^6.3.2"
+#isort = "^5.10.1"
 
-[tool.poetry.group.docs.dependencies]
+[tool.poetry.group.documentation.dependencies]
 Sphinx = "^4.5.0"
 sphinx-rtd-theme = "^1.0.0"
 
