@@ -312,7 +312,7 @@ class TestSetup:
                               'configured': {'input': {'specs': 1, 'pads': 1, 'blocks': [[1001, 2]]}}, 'cleared': []}))
         interface.finalize_setup(initial_setup=True)
         assert ppm.proxy_key == ('modbus',) and ppm.proxy_kwargs == {}
-        [(method, payload)] = ppm.sent
+        [(method, payload, _)] = ppm.sent
         assert method == 'REGISTER_DEVICE'
         assert payload['device_address'] == '10.0.0.4' and payload['device_type'] == 'tcp' and payload['port'] == 502
         assert payload['timeout'] == 3.0 and payload['unit_id'] == 1 and payload['clear_others'] is True
@@ -333,7 +333,7 @@ class TestSetup:
     def test_registration_failure_warns(self, interface, ppm, caplog):
         ppm.queue(serialized({}, {'configure': "Invalid spec 0 for holding table on unit 1: overlaps"}))
         interface.finalize_setup()
-        assert 'Failed to register Modbus device' in caplog.text and 'overlaps' in caplog.text
+        assert 'Failed to register' in caplog.text and 'Modbus Proxy' in caplog.text and 'overlaps' in caplog.text
 
     def test_registration_wait_is_separate_from_device_timeout(self, make_interface, ppm):
         make_interface(timeout=1.0).finalize_setup()
@@ -382,7 +382,7 @@ class TestReads:
         ppm.queue(serialized({'1001': 412.5}))
         results, errors = interface.get_multiple_points([TOPIC('ReturnAirCO2')])
         assert results == {TOPIC('ReturnAirCO2'): 412.5} and errors == {}
-        [(method, payload)] = ppm.sent
+        [(method, payload, _)] = ppm.sent
         assert method == 'READ_REGISTERS'
         assert payload == {'device_address': '10.0.0.4', 'device_type': 'tcp', 'port': 502, 'unit_id': 1,
                            'register_map': 'input', 'decode': True}
@@ -454,7 +454,7 @@ class TestWrites:
     def test_set_point_encodes_via_proxy(self, interface, ppm):
         ppm.queue(serialized([{'address': 1010, 'count': 1}], [None]))
         assert interface.set_point(TOPIC('Mode'), 4) == 4
-        [(method, payload)] = ppm.sent
+        [(method, payload, _)] = ppm.sent
         assert method == 'WRITE_REGISTERS'
         assert payload == {'device_address': '10.0.0.4', 'device_type': 'tcp', 'port': 502, 'unit_id': 1,
                            'register_map': 'holding', 'encode': True, 'queries': [[1010, None, 4]]}
