@@ -71,6 +71,14 @@ class TestRemoteConfig:
         assert cfg.client_options() == {'timeout': 3.0, 'retries': 3}
         assert cfg.proxy_key() == ('modbus',)
 
+    def test_tls_master_sends_its_certificate_settings(self):
+        cfg = ModbusRemoteConfig(driver_type='modbus', device_address='h', transport_protocol='tls', cafile='ca.pem',
+                                 certfile='m.pem', keyfile='m.key')
+        assert cfg.client_options() == {'timeout': 3.0, 'retries': 3, 'ca_path': 'ca.pem', 'cert_path': 'm.pem', 'key_path': 'm.key',
+                                        'tls_verify': True}
+        bare = ModbusRemoteConfig(driver_type='modbus', device_address='h', transport_protocol='tls', tls_verify=False)
+        assert bare.client_options()['tls_verify'] is False and bare.client_options()['ca_path'] is None
+
     def test_tls_default_port_and_group(self):
         cfg = ModbusRemoteConfig(driver_type='modbus', device_address='h', transport_protocol='TLS', proxy_group='plant-b')
         assert cfg.resolved_port == 802 and cfg.proxy_key() == ('modbus', 'plant-b')
@@ -80,7 +88,7 @@ class TestRemoteConfig:
                                  baud_rate=19200, parity='Even', stop_bits=2)
         assert cfg.device_fields() == {'role': 'master', 'device_address': '/dev/ttyUSB0', 'device_type': 'serial'}
         assert cfg.client_options() == {'timeout': 3.0, 'retries': 3, 'baudrate': 19200, 'bytesize': 8,
-                                        'parity': 'E', 'stopbits': 2.0}
+                                        'parity': 'E', 'stopbits': 2.0, 'handle_local_echo': False}
         assert Parity.none.pymodbus == 'N'
 
     @pytest.mark.parametrize('kwargs, expected', [

@@ -10,6 +10,50 @@ from volttron.driver.interfaces.modbus.modbus import Modbus
 from volttron.driver.interfaces.modbus.config import ModbusPointConfig
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 15021
+TRANSPORT = sys.argv[2] if len(sys.argv) > 2 else 'tcp'            # tcp, udp or tls
+
+
+def make_certs(cert_dir):
+    """A CA, a server certificate for 127.0.0.1 and a master certificate, all signed by the CA (tls only)."""
+    import datetime, ipaddress
+    from pathlib import Path
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    cert_dir = Path(cert_dir); cert_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    before, after = now - datetime.timedelta(days=1), now + datetime.timedelta(days=1)
+
+    def write(name, cert, key):
+        (cert_dir / f'{name}.pem').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        (cert_dir / f'{name}.key').write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        return str(cert_dir / f'{name}.pem'), str(cert_dir / f'{name}.key')
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'modbus e2e CA')])
+    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca_key.public_key()).serial_number(x509.random_serial_number())
+          .not_valid_before(before).not_valid_after(after).add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True).sign(ca_key, hashes.SHA256()))
+    ca_path, _ = write('ca', ca, ca_key)
+
+    def leaf(name, usage, san=None):
+        key = ec.generate_private_key(ec.SECP256R1())
+        builder = (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])).issuer_name(ca_name)
+                   .public_key(key.public_key()).serial_number(x509.random_serial_number()).not_valid_before(before).not_valid_after(after)
+                   .add_extension(x509.ExtendedKeyUsage([usage]), critical=False))
+        if san:
+            builder = builder.add_extension(x509.SubjectAlternativeName(san), critical=False)
+        return write(name, builder.sign(ca_key, hashes.SHA256()), key)
+    server_cert, server_key = leaf('server', ExtendedKeyUsageOID.SERVER_AUTH, [x509.IPAddress(ipaddress.ip_address('127.0.0.1'))])
+    master_cert, master_key = leaf('master', ExtendedKeyUsageOID.CLIENT_AUTH)
+    return {'ca': ca_path, 'server_cert': server_cert, 'server_key': server_key, 'master_cert': master_cert, 'master_key': master_key}
+
+
+served_tls, master_tls = {}, {}
+if TRANSPORT == 'tls':
+    import tempfile
+    certs = make_certs(tempfile.mkdtemp(prefix='modbus-tls-'))
+    served_tls = dict(cert_path=certs['server_cert'], key_path=certs['server_key'], ca_path=certs['ca'], client_auth=True)
+    master_tls = dict(ca_path=certs['ca'], cert_path=certs['master_cert'], key_path=certs['master_key'])
 
 
 class Core: spawn = staticmethod(gevent.spawn)
@@ -53,18 +97,20 @@ MASTER_ROWS = [dict(volttron_point_name='ReturnAirCO2', address=1001, data_type=
 served = master = None
 served_agent, master_agent = Agent(), Agent()
 try:
-    served = Modbus(RemoteConfig(driver_type='modbus', driver_role='slave', bind_host='127.0.0.1', port=PORT, unit_id=7), driver_agent=served_agent)
+    served = Modbus(RemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol=TRANSPORT, bind_host='127.0.0.1', port=PORT, unit_id=7,
+                                 **served_tls), driver_agent=served_agent)
     rows = served.prepare_registry_config([dict(r) for r in SERVED_ROWS], served.config)
     check('served rows default to data_source server and writable', all(r['data_source'] == 'server' and r['writable'] is True for r in rows))
     for row in rows:
         served.insert_register(served.create_register(ModbusPointConfig(**row)), 'campus/b/served')
     t0 = time.time(); served.finalize_setup(initial_setup=True); t_setup = time.time() - t0
-    check('proxy launched and unit served', served.proxy_peer is not None and served.proxy_peer.socket_params is not None, f'{t_setup:.1f}s')
+    check(f'proxy launched and unit served over {TRANSPORT}', served.proxy_peer is not None and served.proxy_peer.socket_params is not None, f'{t_setup:.1f}s')
     check('served table pushed on registration', wait_for(lambda: S('FanCmd') in served_agent.flat())
           and served_agent.flat().get(S('ReturnAirCO2')) == 412.5 and served_agent.flat().get(S('Name')) == 'Rtu-1'
           and served_agent.flat().get(S('FanStatus')) is True, str(served_agent.flat()))
 
-    master = Modbus(RemoteConfig(driver_type='modbus', device_address='127.0.0.1', port=PORT, unit_id=7, timeout=5), driver_agent=master_agent)
+    master = Modbus(RemoteConfig(driver_type='modbus', transport_protocol=TRANSPORT, device_address='127.0.0.1', port=PORT, unit_id=7, timeout=5,
+                                 **master_tls), driver_agent=master_agent)
     for row in MASTER_ROWS:
         master.insert_register(master.create_register(ModbusPointConfig(**row)), 'campus/b/master')
     master.finalize_setup(initial_setup=True)

@@ -316,12 +316,16 @@ class ModbusRemoteConfig(RemoteConfig):
     device_address: str | None = None
     # Slave role over tcp, udp or tls: the interface to listen on.
     bind_host: str = Field(default='0.0.0.0', validation_alias=AliasChoices('bind_host', 'listen_host'))
-    # Slave role over tls: the server certificate and key, and the CA that signed the masters' certificates when
-    # client_auth is on.
+    # TLS. Master role: ca_path verifies the server (the system CAs when blank; tls_verify false skips the check),
+    # cert_path/key_path is this master's certificate for servers that require client authentication. Slave role: the
+    # server certificate and key, and the CA that signed the masters' certificates when client_auth is on.
     cert_path: str | None = Field(default=None, validation_alias=AliasChoices('cert_path', 'certfile', 'cert'))
     key_path: str | None = Field(default=None, validation_alias=AliasChoices('key_path', 'keyfile', 'key'))
     ca_path: str | None = Field(default=None, validation_alias=AliasChoices('ca_path', 'cafile', 'ca'))
+    tls_verify: bool = True
     client_auth: bool = False
+    # Serial: whether the adapter echoes what the master sends (half-duplex RS-485 adapters without echo suppression).
+    handle_local_echo: bool = False
     # None resolves to 802 for TLS and 502 otherwise. Ignored for serial.
     port: int | None = None
     unit_id: int = Field(default=1, validation_alias=AliasChoices('unit_id', 'device_id', 'slave_id'))
@@ -417,11 +421,13 @@ class ModbusRemoteConfig(RemoteConfig):
         return fields
 
     def client_options(self) -> dict:
-        """pymodbus client settings for REGISTER_DEVICE."""
+        """pymodbus client settings sent with the master role's registration."""
         options = {'timeout': self.timeout, 'retries': self.retries}
         if self.transport_protocol is TransportProtocol.serial:
             options.update(baudrate=self.baudrate, bytesize=self.bytesize, parity=self.parity.pymodbus,
-                           stopbits=self.stopbits.value)
+                           stopbits=self.stopbits.value, handle_local_echo=self.handle_local_echo)
+        elif self.transport_protocol is TransportProtocol.tls:
+            options.update(ca_path=self.ca_path, cert_path=self.cert_path, key_path=self.key_path, tls_verify=self.tls_verify)
         return options
 
     def listener_options(self) -> dict:

@@ -33,10 +33,12 @@ def test_end_to_end(tmp_path):
     assert '15/15 passed' in proc.stdout, report
 
 
-def test_end_to_end_slave_role(tmp_path):
-    """A served unit and a master, both interfaces through one real proxy process, with a proxy crash in between."""
+@pytest.mark.parametrize('transport', ['tcp', 'udp', 'tls'])
+def test_end_to_end_slave_role(tmp_path, transport):
+    """A served unit and a master, both interfaces through one real proxy process, with a proxy crash in between; over
+    TLS the served unit requires the master's certificate."""
     log = tmp_path / 'e2e_server.log'
-    proc = subprocess.run([sys.executable, str(SERVER_HARNESS), str(_free_port())], capture_output=True, text=True,
+    proc = subprocess.run([sys.executable, str(SERVER_HARNESS), str(_free_port()), transport], capture_output=True, text=True,
                           timeout=180, env={**__import__('os').environ, 'MODBUS_E2E_LOG': str(log)})
     report = proc.stdout + proc.stderr
     if proc.returncode != 0 and log.exists():
