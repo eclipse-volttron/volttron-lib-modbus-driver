@@ -384,8 +384,8 @@ class TestReads:
         assert results == {TOPIC('ReturnAirCO2'): 412.5} and errors == {}
         [(method, payload, _)] = ppm.sent
         assert method == 'READ_REGISTERS'
-        assert payload == {'device_address': '10.0.0.4', 'device_type': 'tcp', 'port': 502, 'unit_id': 1,
-                           'register_map': 'input', 'decode': True}
+        assert payload == {'register_map': 'input', 'decode': True}       # the header's remote id names device and unit
+        assert ppm.messages[-1].remote_id == interface.remote_id
 
     def test_subset_poll_sends_queries_with_bridging_pads(self, make_interface, ppm):
         iface = make_interface([point('a', 1001), point('b', 1003), point('gap', 1005, 'pad[5]', table='input'),
@@ -456,8 +456,7 @@ class TestWrites:
         assert interface.set_point(TOPIC('Mode'), 4) == 4
         [(method, payload, _)] = ppm.sent
         assert method == 'WRITE_REGISTERS'
-        assert payload == {'device_address': '10.0.0.4', 'device_type': 'tcp', 'port': 502, 'unit_id': 1,
-                           'register_map': 'holding', 'encode': True, 'queries': [[1010, None, 4]]}
+        assert payload == {'register_map': 'holding', 'encode': True, 'queries': [[1010, None, 4]]}
         assert TOPIC('Mode') in interface._tracker.dirty_points
 
     def test_set_point_read_only(self, interface, ppm):

@@ -208,7 +208,7 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
             by_table[cast(ModbusRegister, self.point_map[topic]).table].append(topic)
         batches = []
         for table, batch in by_table.items():
-            payload = {**self.config.device_fields(), 'unit_id': self.config.unit_id, 'register_map': table.value, 'decode': True}
+            payload = {'register_map': table.value, 'decode': True}         # the header's remote id names device and unit
             if len(batch) < self._point_count(table):
                 payload['queries'] = self._queries_for(table, [cast(ModbusRegister, self.point_map[t]) for t in batch])
             batches.append((payload, batch))
@@ -235,7 +235,7 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         by_table: dict[Table, list[tuple[str, Any]]] = defaultdict(list)
         for topic, value in items:
             by_table[cast(ModbusRegister, self.point_map[topic]).table].append((topic, value))
-        return [({**self.config.device_fields(), 'unit_id': self.config.unit_id, 'register_map': table.value, 'encode': True,
+        return [({'register_map': table.value, 'encode': True,
                   'queries': [[cast(ModbusRegister, self.point_map[t]).address, None, v] for t, v in batch]}, batch)
                 for table, batch in by_table.items()]
 
