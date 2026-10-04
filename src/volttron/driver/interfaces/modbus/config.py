@@ -233,7 +233,7 @@ class ModbusPointConfig(PointConfig):
             if isinstance(data_type, str) and is_pad_type(data_type):
                 overridden = ('active', 'data_source', 'Data Source', 'writable', 'Writable')
                 data = {**{k: v for k, v in data.items() if k not in overridden},
-                        'active': False, 'data_source': 'never', 'writable': False}
+                        'active': False, 'data_source': 'never_poll', 'writable': False}
         return data
 
     @model_validator(mode='before')

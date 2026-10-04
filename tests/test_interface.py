@@ -168,7 +168,7 @@ class TestCreateRegister:
                     {'Volttron Point Name': 'gap', 'Point Address': 1005, 'Modbus Register': 'PAD[2]', 'Table': 'holding',
                      'Writable': 'TRUE'}):
             cfg = ModbusPointConfig(**row)
-            assert cfg.is_pad and cfg.active is False and cfg.data_source.value == 'never' and cfg.writable is False
+            assert cfg.is_pad and cfg.active is False and cfg.data_source.value == 'never_poll' and cfg.writable is False
         real = ModbusPointConfig(volttron_point_name='p', address=1, data_type='uint16')
         assert real.active is None and real.data_source.value == 'short_poll'
 
