@@ -67,7 +67,7 @@ class TestRemoteConfig:
     def test_defaults(self):
         cfg = ModbusRemoteConfig(driver_type='modbus', device_address='10.0.0.4')
         assert cfg.resolved_port == 502 and cfg.unit_id == 1 and cfg.addressing is Addressing.offset
-        assert cfg.device_fields() == {'device_address': '10.0.0.4', 'device_type': 'tcp', 'port': 502}
+        assert cfg.device_fields() == {'role': 'master', 'device_address': '10.0.0.4', 'device_type': 'tcp', 'port': 502}
         assert cfg.client_options() == {'timeout': 3.0, 'retries': 3}
         assert cfg.proxy_key() == ('modbus',)
 
@@ -78,7 +78,7 @@ class TestRemoteConfig:
     def test_serial_options_use_pymodbus_spellings(self):
         cfg = ModbusRemoteConfig(driver_type='modbus', device_address='/dev/ttyUSB0', transport_protocol='serial',
                                  baud_rate=19200, parity='Even', stop_bits=2)
-        assert cfg.device_fields() == {'device_address': '/dev/ttyUSB0', 'device_type': 'serial'}
+        assert cfg.device_fields() == {'role': 'master', 'device_address': '/dev/ttyUSB0', 'device_type': 'serial'}
         assert cfg.client_options() == {'timeout': 3.0, 'retries': 3, 'baudrate': 19200, 'bytesize': 8,
                                         'parity': 'E', 'stopbits': 2.0}
         assert Parity.none.pymodbus == 'N'
@@ -313,7 +313,7 @@ class TestSetup:
         interface.finalize_setup(initial_setup=True)
         assert ppm.proxy_key == ('modbus',) and ppm.proxy_kwargs == {}
         [(method, payload, _)] = ppm.sent
-        assert method == 'REGISTER_DEVICE'
+        assert method == 'REGISTER_REMOTE'
         assert payload['device_address'] == '10.0.0.4' and payload['device_type'] == 'tcp' and payload['port'] == 502
         assert payload['timeout'] == 3.0 and payload['unit_id'] == 1 and payload['clear_others'] is True
         tables = payload['tables']
@@ -509,3 +509,84 @@ class TestWrites:
         ppm.queue(serialized([{'address': 1003, 'count': 2}], [None]))
         interface.revert_point(TOPIC('CO2Stpt'))
         assert ppm.payloads('WRITE_REGISTERS')[-1]['queries'] == [[1003, None, 1000.0]]
+
+
+from pydantic import ValidationError
+from volttron.driver.base.config import RemoteConfig
+from volttron.driver.interfaces.modbus.config import DriverRole, ModbusRemoteConfig
+
+SERVED = {'driver_type': 'modbus', 'driver_role': 'slave', 'bind_host': '127.0.0.1', 'port': 15020, 'unit_id': 7}
+SERVED_POINTS = [
+    point('ReturnAirCO2', 1001, data_source='server', writable=True, default_value='412.5'),            # telemetry: input table
+    point('CO2Stpt', 1003, writable=True, data_source='server', remote_writable=True, default_value='1000'),  # holding
+    point('Name', 1005, 'string[6]', writable=True, data_source='server', table='holding', remote_writable=False),
+    point('gap', 1008, 'pad[2]', table='holding'),
+    point('FanCmd', 5, 'bool', writable=True, data_source='server', remote_writable=True),               # coil
+    point('FanStatus', 3, 'bool', writable=True, data_source='server'),                                 # discrete input
+]
+
+
+class TestSlaveRole:
+    def test_role_values_and_fields(self):
+        cfg = ModbusRemoteConfig(**SERVED)
+        assert cfg.driver_role is DriverRole.slave and cfg.is_server and cfg.device_address is None
+        assert cfg.device_fields() == {'role': 'slave', 'bind_host': '127.0.0.1', 'port': 15020, 'unit_id': 7}
+        assert ModbusRemoteConfig(driver_type='modbus', driver_role='Server').is_server
+        assert ModbusRemoteConfig(driver_type='modbus', device_address='h').device_fields()['role'] == 'master'
+        assert ModbusRemoteConfig(driver_type='modbus', driver_role='client', device_address='h').driver_role is DriverRole.master
+        with pytest.raises(ValidationError, match='needs the device_address'):
+            ModbusRemoteConfig(driver_type='modbus')
+        with pytest.raises(ValidationError, match='Modbus TCP'):
+            ModbusRemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol='serial')
+
+    def test_served_rows_pick_tables_by_remote_writability(self, make_interface):
+        iface = make_interface(SERVED_POINTS, **SERVED)
+        reg = {t.rsplit('/', 1)[-1]: r for t, r in iface.point_map.items()}
+        assert (reg['ReturnAirCO2'].table, reg['ReturnAirCO2'].remote_writable) == (Table.input, False)
+        assert (reg['CO2Stpt'].table, reg['CO2Stpt'].remote_writable) == (Table.holding, True)
+        assert (reg['Name'].table, reg['Name'].remote_writable) == (Table.holding, False)
+        assert (reg['FanCmd'].table, reg['FanCmd'].remote_writable) == (Table.coil, True)
+        assert (reg['FanStatus'].table, reg['FanStatus'].remote_writable) == (Table.discrete_input, False)
+        assert all(not r.read_only for r in reg.values())                       # the platform writes every served point
+        with pytest.raises(ValueError, match='read-only'):
+            make_interface([point('x', 1, writable=True, table='input')])          # not served: still refused
+
+    def test_prepare_registry_config_defaults_served_rows(self, make_interface):
+        iface = make_interface(**SERVED)
+        rows = [{'Volttron Point Name': 'a', 'Address': 1, 'Data Type': 'uint16'},
+                {'Volttron Point Name': 'b', 'Address': 2, 'Data Type': 'uint16', 'Writable': 'FALSE', 'Data Source': 'static'}]
+        prepared = iface.prepare_registry_config(rows, RemoteConfig(**SERVED))
+        assert prepared[0] == {**rows[0], 'data_source': 'server', 'writable': True} and prepared[1] == rows[1]
+        assert iface.prepare_registry_config(rows, RemoteConfig(driver_type='modbus', device_address='h')) == rows
+
+    def test_registration_payload_describes_the_served_unit(self, make_interface, ppm):
+        iface = make_interface(SERVED_POINTS, **SERVED)
+        assert 'RECEIVE_WRITES' in ppm.callbacks
+        ppm.queue(serialized({'server': 'served:127.0.0.1:15020:7', 'configured': {}, 'seeded': 0, 'port': 15020}))
+        iface.finalize_setup(initial_setup=True)
+        (method, payload, _), = ppm.sent
+        assert method == 'REGISTER_REMOTE'
+        assert {k: v for k, v in payload.items() if k != 'tables'} == {'role': 'slave', 'bind_host': '127.0.0.1', 'port': 15020,
+                                                                        'unit_id': 7, 'values': {}, 'remote_id': iface.remote_id.hex}
+        holding = {r.get('topic', 'pad'): r for r in payload['tables']['holding']}
+        assert holding[TOPIC('CO2Stpt')] == {'address': 1003, 'data_type': 'FLOAT32', 'count': 2, 'word_order': 'big',
+                                             'topic': TOPIC('CO2Stpt'), 'remote_writable': True, 'initial_value': 1000.0}
+        assert holding[TOPIC('Name')]['remote_writable'] is False and holding['pad'] == {'address': 1008, 'data_type': 'PAD', 'count': 2}
+        assert payload['tables']['input'][0]['topic'] == TOPIC('ReturnAirCO2') and payload['tables']['input'][0]['initial_value'] == 412.5
+        assert payload['tables']['coil'][0]['remote_writable'] is True and payload['tables']['discrete_input'][0]['remote_writable'] is False
+
+    def test_served_reads_and_writes_go_by_topic_and_writes_are_reflected(self, make_interface, ppm):
+        iface = make_interface(SERVED_POINTS, **SERVED)
+        iface.proxy_peer = ppm.peer
+        ppm.queue(serialized({TOPIC('ReturnAirCO2'): 412.5, TOPIC('FanStatus'): True}))
+        results, errors = iface.get_multiple_points([TOPIC('ReturnAirCO2'), TOPIC('FanStatus'), TOPIC('CO2Stpt')])
+        assert results == {TOPIC('ReturnAirCO2'): 412.5, TOPIC('FanStatus'): True} and 'No value' in errors[TOPIC('CO2Stpt')]
+        assert ppm.payloads('READ_POINTS') == [{'topics': [TOPIC('ReturnAirCO2'), TOPIC('FanStatus'), TOPIC('CO2Stpt')]}]
+        ppm.queue(serialized({TOPIC('ReturnAirCO2'): {'status': 'stored'}, TOPIC('FanStatus'): {'status': 'stored'}}))
+        results, errors = iface.set_multiple_points([(TOPIC('ReturnAirCO2'), '450.25'), (TOPIC('FanStatus'), 'on')])
+        assert results == {TOPIC('ReturnAirCO2'): 450.25, TOPIC('FanStatus'): True} and errors == {}
+        assert ppm.payloads('WRITE_POINTS') == [{'values': {TOPIC('ReturnAirCO2'): 450.25, TOPIC('FanStatus'): True}}]
+        iface.driver_agent.publish_push.assert_called_once_with({TOPIC('ReturnAirCO2'): 450.25, TOPIC('FanStatus'): True})
+
+    def test_unique_remote_id_includes_the_role(self):
+        assert Modbus.unique_remote_id('x', RemoteConfig(**SERVED)) == ('modbus', 'slave', '127.0.0.1', 15020, 7)

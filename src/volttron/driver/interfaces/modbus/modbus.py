@@ -35,12 +35,18 @@
 # BATTELLE for the UNITED STATES DEPARTMENT OF ENERGY
 # under Contract DE-AC05-76RL01830
 # }}}
-"""Modbus driver interface.
+"""Modbus driver interface: a master reaching a device (``driver_role: master``, the default) or a Modbus TCP unit served
+to a remote master (``driver_role: slave``).
 
 All Modbus communication happens in the Modbus Protocol Proxy, a separate process shared by every Modbus device.
 This interface declares each device's register data types to the proxy once, then reads and writes decoded values
 by address. Grouping registers into requests, padding, and value encoding are the proxy's job; the exchange itself
 (registration, reply parsing, batching, failure handling) is :class:`ProxyBackedInterface`.
+
+In the slave role the registry rows are the served registers: ``set_point`` stores a value in any table (inputs are
+the telemetry the unit serves) and reflects it into the equipment tree at once, ``get_multiple_points`` reports what
+the proxy holds, and the master's accepted writes to ``Remote Writable`` points (coils and holding registers by
+default) arrive as pushes. Served rows default to ``data_source: server``, so they are never polled.
 """
 from gevent import monkey
 monkey.patch_socket()
@@ -55,8 +61,8 @@ from protocol_proxy.protocol.modbus.registers import DATATYPE, PAD, RegisterSpec
 from volttron.driver.base.interfaces import BaseInterface, BaseRegister, BasicRevert
 from volttron.driver.base.proxy_interface import PointError, ProxyBackedInterface
 
-from .config import (ModbusPointConfig, ModbusRemoteConfig, Table, TransportProtocol, merge_register_map,
-                     normalize_register_map)
+from .config import (DriverRole, ModbusPointConfig, ModbusRemoteConfig, ROLE_ALIASES, Table, TransportProtocol,
+                     merge_register_map, normalize_register_map)
 
 _log = logging.getLogger(__name__)
 
@@ -74,6 +80,7 @@ class ModbusRegister(BaseRegister):
         self.spec = spec
         self.python_type = bool if table.is_bits else PYTHON_TYPES.get(spec.data_type, int)
         self.default_value = default_value       # Value to revert to, already coerced to python_type; None if unset.
+        self.remote_writable = False             # Slave role: whether the master may write this point.
 
     @property
     def address(self) -> int:
@@ -102,7 +109,7 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
     REGISTER_CONFIG_CLASS = ModbusPointConfig
     INTERFACE_CONFIG_CLASS = ModbusRemoteConfig
     PROXY_NAME, PROXY_LABEL = 'modbus', 'Modbus Proxy'
-    REGISTER_METHOD, READ_METHOD, WRITE_METHOD = 'REGISTER_DEVICE', 'READ_REGISTERS', 'WRITE_REGISTERS'
+    REGISTER_METHOD, READ_METHOD, WRITE_METHOD = 'REGISTER_REMOTE', 'READ_REGISTERS', 'WRITE_REGISTERS'
     REQUEST_ERROR_KEY = 'device'
 
     def __init__(self, config, *args, **kwargs):
@@ -112,7 +119,14 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         # Pads: registry rows with data type 'pad', read to keep polls contiguous but never published.
         self.pads: dict[Table, list[RegisterSpec]] = defaultdict(list)
         self.topics_by_address: dict[tuple[Table, int], str] = {}
+        if self.config.is_server:
+            # A served unit is read and written by topic, and the master's writes come back as pushes.
+            self.READ_METHOD, self.WRITE_METHOD, self.PUSH_METHOD = 'READ_POINTS', 'WRITE_POINTS', 'RECEIVE_WRITES'
         self.init_proxy()
+
+    @property
+    def is_server(self) -> bool:
+        return self.config.is_server
 
     # ------------------------------------------------------------------ registers
 
@@ -125,8 +139,14 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         is_pad = data_type is PAD
         if is_pad and point.table is None:
             raise ValueError(f"Pad {point.volttron_point_name} must name its table.")
-        table = point.table or self._default_table(data_type, point.writable)
-        if point.writable and table.read_only:
+        served = point.is_served
+        if table_given := point.table:
+            table = table_given
+        elif served:
+            table = self._default_served_table(data_type, point.remote_writable)
+        else:
+            table = self._default_table(data_type, point.writable)
+        if point.writable and table.read_only and not served:
             raise ValueError(f"Point {point.volttron_point_name} is writable but the {table.value} table is read-only.")
         if table.is_bits and data_type not in (DATATYPE.BITS, PAD):
             raise ValueError(f"Point {point.volttron_point_name}: {table.value} table holds booleans, not {data_type.name}.")
@@ -147,6 +167,7 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
 
         register = ModbusRegister(point.volttron_point_name, point.units, not point.writable, table, spec,
                                   description=point.description or point.notes)
+        register.remote_writable = served and not is_pad and point.resolved_remote_writable(table)
         if point.writable and not is_pad and point.default_value not in (None, ''):
             try:
                 register.default_value = self._coerce(register, point.default_value)
@@ -175,10 +196,24 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         may be newer than self.config during an update), otherwise from this interface's configuration.
         """
         if remote_config is not None and hasattr(remote_config, 'register_map'):
-            register_map = normalize_register_map(remote_config.register_map, self.config.device_address)
+            register_map = normalize_register_map(remote_config.register_map, str(self.config.device_address))
         else:
             register_map = self.config.register_map
-        return merge_register_map(registry_config, register_map, self.config.device_address)
+        rows = merge_register_map(registry_config, register_map, str(self.config.device_address))
+        role = getattr(remote_config, 'driver_role', None) if remote_config is not None else self.config.driver_role
+        role = getattr(role, 'value', role)
+        if ROLE_ALIASES.get(role, role) != DriverRole.slave.value:
+            return rows
+        # Served rows default to the server data source and to being writable by the platform (they are what it serves).
+        prepared = []
+        for row in rows:
+            row = dict(row)
+            if all(row.get(key) in (None, '') for key in ('data_source', 'Data Source')):
+                row['data_source'] = 'server'
+            if all(row.get(key) in (None, '') for key in ('writable', 'Writable')):
+                row['writable'] = True
+            prepared.append(row)
+        return prepared
 
     # ------------------------------------------------------------------ the proxy exchange, in Modbus terms
 
@@ -186,23 +221,36 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         return self.config.device_fields()
 
     def registration_payload(self) -> dict:
-        """This device's client settings and its register data types, by table."""
+        """This device's client settings and its register data types, by table; a served unit's rows add the topic,
+        whether the master may write the point, and its starting value."""
         tables: dict[str, list[dict]] = defaultdict(list)
-        for register in self.point_map.values():
-            tables[register.table.value].append(register.spec_fields())
+        for topic, register in self.point_map.items():
+            fields = register.spec_fields()
+            if self.is_server:
+                fields.update({'topic': topic, 'remote_writable': register.remote_writable, 'initial_value': register.default_value})
+            tables[register.table.value].append(fields)
         for table, pads in self.pads.items():
             tables[table.value].extend({'address': pad.address, 'data_type': 'PAD', 'count': pad.count} for pad in pads)
+        if self.is_server:
+            return {**self.config.device_fields(), 'tables': dict(tables), 'values': self.tree_values()}
         return {**self.config.device_fields(), **self.config.client_options(),
                 'unit_id': self.config.unit_id, 'max_gap': self.config.max_gap, 'tables': dict(tables), 'clear_others': True}
 
     def after_registration(self, result: dict, initial_setup: bool):
+        if self.is_server:
+            _log.info(f"Modbus unit {self.config.unit_id} is served on {self.config.bind_host}:{result.get('port', self.config.resolved_port)}"
+                      f" by the proxy as {result.get('server')}: {result.get('configured')}.")
+            return
         for table, summary in (result.get('configured') or {}).items():
             _log.info(f"Modbus {self.config.device_address} unit {self.config.unit_id} {table} table:"
                       f" {summary.get('specs')} points, {summary.get('pads')} pads,"
                       f" {len(summary.get('blocks', []))} request(s) per poll.")
 
     def split_reads(self, topics: list[str], **kwargs) -> list[tuple[dict, list[str]]]:
-        """One READ_REGISTERS per table; a partial table names its queries, a whole one lets the proxy use its blocks."""
+        """One READ_REGISTERS per table; a partial table names its queries, a whole one lets the proxy use its blocks.
+        A served unit is read by topic in one request."""
+        if self.is_server:
+            return ProxyBackedInterface.split_reads(self, topics, **kwargs)
         by_table: dict[Table, list[str]] = defaultdict(list)
         for topic in topics:
             by_table[cast(ModbusRegister, self.point_map[topic]).table].append(topic)
@@ -215,11 +263,15 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         return batches
 
     def read_key(self, topic: str, register: BaseRegister) -> str:
+        if self.is_server:
+            return topic
         return str(cast(ModbusRegister, register).address)      # replies are keyed by register address
 
     def read_error(self, topic: str, register: BaseRegister, request_errors: Any) -> str:
         if isinstance(request_errors, dict) and topic in request_errors:
             return str(request_errors[topic])
+        if self.is_server:
+            return ProxyBackedInterface.read_error(self, topic, register, request_errors)
         return self._describe_read_error(cast(ModbusRegister, register), request_errors)
 
     def coerce(self, register: BaseRegister, value: Any) -> Any:
@@ -231,7 +283,10 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
             raise PointError(f'Value {value!r} is not valid for this point ({register.python_type.__name__}): {e}') from e
 
     def split_writes(self, items: list[tuple[str, Any]], **kwargs) -> list[tuple[dict, list[tuple[str, Any]]]]:
-        """One WRITE_REGISTERS per table, with the encoded values by address."""
+        """One WRITE_REGISTERS per table, with the encoded values by address. A served unit takes every value by topic
+        in one request."""
+        if self.is_server:
+            return ProxyBackedInterface.split_writes(self, items, **kwargs)
         by_table: dict[Table, list[tuple[str, Any]]] = defaultdict(list)
         for topic, value in items:
             by_table[cast(ModbusRegister, self.point_map[topic]).table].append((topic, value))
@@ -240,7 +295,13 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
                 for table, batch in by_table.items()]
 
     def interpret_write(self, items: list[tuple[str, Any]], result: Any, request_errors: Any) -> tuple[dict, dict]:
-        """The proxy answers a write with positional acknowledgements and errors, one per query."""
+        """The proxy answers a write with positional acknowledgements and errors, one per query. A served unit answers
+        by topic; its stored values are reflected into the equipment tree at once."""
+        if self.is_server:
+            results, errors = ProxyBackedInterface.interpret_write(self, items, result, request_errors)
+            if results:
+                self.driver_agent.publish_push(dict(results))
+            return results, errors
         results, errors = {}, {}
         if isinstance(request_errors, dict) and not isinstance(result, list):
             return results, dict(request_errors)                 # Whole-request failure, already keyed by topic.
@@ -289,6 +350,13 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         return Table.holding if writable else Table.input
 
     @staticmethod
+    def _default_served_table(data_type, remote_writable: bool | None) -> Table:
+        """A served point goes to a writable table only when the master may write it; telemetry is served as inputs."""
+        if data_type is DATATYPE.BITS:
+            return Table.coil if remote_writable else Table.discrete_input
+        return Table.holding if remote_writable else Table.input
+
+    @staticmethod
     def _coerce(register: ModbusRegister, value: Any):
         if isinstance(value, (list, tuple)):
             return [Modbus._coerce_scalar(register.python_type, v) for v in value]
@@ -313,8 +381,10 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
 
     @classmethod
     def unique_remote_id(cls, config_name: str, config) -> tuple:
-        """Identifies the device: one DriverAgent per Modbus unit."""
+        """Identifies the remote: one DriverAgent per Modbus unit reached, or per listener and unit served."""
         cfg = cls.INTERFACE_CONFIG_CLASS(**config.model_dump())
+        if cfg.is_server:
+            return 'modbus', 'slave', cfg.bind_host, cfg.resolved_port, cfg.unit_id
         if cfg.transport_protocol is TransportProtocol.serial:
             return cfg.transport_protocol.value, cfg.device_address, cfg.unit_id
         return cfg.transport_protocol.value, cfg.device_address, cfg.resolved_port, cfg.unit_id

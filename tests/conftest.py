@@ -39,7 +39,7 @@ def make_interface(ppm):
     """Build a real Modbus interface whose proxy manager is the FakePPM."""
     def build(points=(), base_topic='campus/building/rtu', **remote):
         remote = {'driver_type': 'modbus', 'device_address': '10.0.0.4', **remote}
-        return build_interface(Modbus, remote, driver_agent=mock.Mock(), ppm=ppm, points=points, base_topic=base_topic)
+        return build_interface(Modbus, remote, driver_agent=mock.Mock(equipment_model=None), ppm=ppm, points=points, base_topic=base_topic)
     return build
 
 
