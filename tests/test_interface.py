@@ -530,14 +530,27 @@ class TestSlaveRole:
     def test_role_values_and_fields(self):
         cfg = ModbusRemoteConfig(**SERVED)
         assert cfg.driver_role is DriverRole.slave and cfg.is_server and cfg.device_address is None
-        assert cfg.device_fields() == {'role': 'slave', 'bind_host': '127.0.0.1', 'port': 15020, 'unit_id': 7}
+        assert cfg.device_fields() == {'role': 'slave', 'transport_protocol': 'tcp', 'bind_host': '127.0.0.1', 'port': 15020, 'unit_id': 7}
+        assert cfg.listener_options() == {}
         assert ModbusRemoteConfig(driver_type='modbus', driver_role='Server').is_server
         assert ModbusRemoteConfig(driver_type='modbus', device_address='h').device_fields()['role'] == 'master'
         assert ModbusRemoteConfig(driver_type='modbus', driver_role='client', device_address='h').driver_role is DriverRole.master
+        udp = ModbusRemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol='udp', port=1502)
+        assert udp.device_fields() == {'role': 'slave', 'transport_protocol': 'udp', 'bind_host': '0.0.0.0', 'port': 1502, 'unit_id': 1}
+        tls = ModbusRemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol='tls', certfile='s.pem', keyfile='s.key',
+                                 cafile='ca.pem', client_auth=True)
+        assert tls.device_fields()['port'] == 802
+        assert tls.listener_options() == {'cert_path': 's.pem', 'key_path': 's.key', 'ca_path': 'ca.pem', 'client_auth': True}
+        serial = ModbusRemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol='serial', device_address='/dev/ttyUSB0',
+                                    baud_rate=19200, parity='Even', unit_id=3)
+        assert serial.device_fields() == {'role': 'slave', 'transport_protocol': 'serial', 'device_address': '/dev/ttyUSB0', 'unit_id': 3}
+        assert serial.listener_options() == {'baudrate': 19200, 'bytesize': 8, 'parity': 'E', 'stopbits': 1.0}
         with pytest.raises(ValidationError, match='needs the device_address'):
             ModbusRemoteConfig(driver_type='modbus')
-        with pytest.raises(ValidationError, match='Modbus TCP'):
+        with pytest.raises(ValidationError, match='serial port'):
             ModbusRemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol='serial')
+        with pytest.raises(ValidationError, match='cert_path and key_path'):
+            ModbusRemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol='tls')
 
     def test_served_rows_pick_tables_by_remote_writability(self, make_interface):
         iface = make_interface(SERVED_POINTS, **SERVED)
@@ -566,8 +579,8 @@ class TestSlaveRole:
         iface.finalize_setup(initial_setup=True)
         (method, payload, _), = ppm.sent
         assert method == 'REGISTER_REMOTE'
-        assert {k: v for k, v in payload.items() if k != 'tables'} == {'role': 'slave', 'bind_host': '127.0.0.1', 'port': 15020,
-                                                                        'unit_id': 7, 'values': {}, 'remote_id': iface.remote_id.hex}
+        assert {k: v for k, v in payload.items() if k != 'tables'} == {'role': 'slave', 'transport_protocol': 'tcp', 'bind_host': '127.0.0.1',
+                                                                        'port': 15020, 'unit_id': 7, 'values': {}, 'remote_id': iface.remote_id.hex}
         holding = {r.get('topic', 'pad'): r for r in payload['tables']['holding']}
         assert holding[TOPIC('CO2Stpt')] == {'address': 1003, 'data_type': 'FLOAT32', 'count': 2, 'word_order': 'big',
                                              'topic': TOPIC('CO2Stpt'), 'remote_writable': True, 'initial_value': 1000.0}
@@ -588,5 +601,15 @@ class TestSlaveRole:
         assert ppm.payloads('WRITE_POINTS') == [{'values': {TOPIC('ReturnAirCO2'): 450.25, TOPIC('FanStatus'): True}}]
         iface.driver_agent.publish_push.assert_called_once_with({TOPIC('ReturnAirCO2'): 450.25, TOPIC('FanStatus'): True})
 
-    def test_unique_remote_id_includes_the_role(self):
-        assert Modbus.unique_remote_id('x', RemoteConfig(**SERVED)) == ('modbus', 'slave', '127.0.0.1', 15020, 7)
+    def test_unique_remote_id_includes_the_role_and_transport(self):
+        assert Modbus.unique_remote_id('x', RemoteConfig(**SERVED)) == ('modbus', 'slave', 'tcp', '127.0.0.1', 15020, 7)
+        serial = RemoteConfig(driver_type='modbus', driver_role='slave', transport_protocol='serial', device_address='/dev/ttyS1', unit_id=2)
+        assert Modbus.unique_remote_id('x', serial) == ('modbus', 'slave', 'serial', '/dev/ttyS1', 2)
+
+    def test_tls_registration_carries_the_listener_options(self, make_interface, ppm):
+        iface = make_interface(SERVED_POINTS[:1], driver_type='modbus', driver_role='slave', transport_protocol='tls', bind_host='127.0.0.1',
+                               cert_path='s.pem', key_path='s.key')
+        iface.finalize_setup()
+        payload = ppm.payloads('REGISTER_REMOTE')[0]
+        assert payload['transport_protocol'] == 'tls' and payload['port'] == 802 and payload['cert_path'] == 's.pem'
+        assert payload['client_auth'] is False and payload['ca_path'] is None

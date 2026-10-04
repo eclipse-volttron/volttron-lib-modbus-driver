@@ -311,10 +311,17 @@ class ModbusRemoteConfig(RemoteConfig):
     driver_role: DriverRole = DriverRole.master
     transport_protocol: TransportProtocol = Field(default=TransportProtocol.tcp,
                                                   validation_alias=AliasChoices('transport_protocol', 'transport'))
-    # Master role: the device (or gateway) to reach. Required in that role.
+    # Master role: the device (or gateway) to reach, or the serial port. Slave role over serial: the serial port to
+    # serve on. Required in both of those cases.
     device_address: str | None = None
-    # Slave role: the interface to listen on (TCP only).
+    # Slave role over tcp, udp or tls: the interface to listen on.
     bind_host: str = Field(default='0.0.0.0', validation_alias=AliasChoices('bind_host', 'listen_host'))
+    # Slave role over tls: the server certificate and key, and the CA that signed the masters' certificates when
+    # client_auth is on.
+    cert_path: str | None = Field(default=None, validation_alias=AliasChoices('cert_path', 'certfile', 'cert'))
+    key_path: str | None = Field(default=None, validation_alias=AliasChoices('key_path', 'keyfile', 'key'))
+    ca_path: str | None = Field(default=None, validation_alias=AliasChoices('ca_path', 'cafile', 'ca'))
+    client_auth: bool = False
     # None resolves to 802 for TLS and 502 otherwise. Ignored for serial.
     port: int | None = None
     unit_id: int = Field(default=1, validation_alias=AliasChoices('unit_id', 'device_id', 'slave_id'))
@@ -367,8 +374,11 @@ class ModbusRemoteConfig(RemoteConfig):
     def _check_role_fields(self):
         if self.driver_role is DriverRole.master and not self.device_address:
             raise ValueError('A Modbus master needs the device_address of the device or gateway to reach.')
-        if self.driver_role is DriverRole.slave and self.transport_protocol is not TransportProtocol.tcp:
-            raise ValueError('A served Modbus unit is Modbus TCP; set transport_protocol to tcp.')
+        if self.driver_role is DriverRole.slave:
+            if self.transport_protocol is TransportProtocol.serial and not self.device_address:
+                raise ValueError('A Modbus unit served over serial needs the device_address of the serial port.')
+            if self.transport_protocol is TransportProtocol.tls and (not self.cert_path or not self.key_path):
+                raise ValueError('A Modbus unit served over TLS needs cert_path and key_path (its server certificate).')
         return self
 
     @property
@@ -393,9 +403,14 @@ class ModbusRemoteConfig(RemoteConfig):
         return 802 if self.transport_protocol is TransportProtocol.tls else 502
 
     def device_fields(self) -> dict:
-        """What identifies the remote to the proxy: the device to reach, or the listener and unit to serve."""
+        """What identifies the remote to the proxy: the device to reach, or the endpoint and unit to serve."""
         if self.is_server:
-            return {'role': 'slave', 'bind_host': self.bind_host, 'port': self.resolved_port, 'unit_id': self.unit_id}
+            fields = {'role': 'slave', 'transport_protocol': self.transport_protocol.value, 'unit_id': self.unit_id}
+            if self.transport_protocol is TransportProtocol.serial:
+                fields['device_address'] = self.device_address
+            else:
+                fields.update(bind_host=self.bind_host, port=self.resolved_port)
+            return fields
         fields = {'role': 'master', 'device_address': self.device_address, 'device_type': self.transport_protocol.value}
         if self.transport_protocol is not TransportProtocol.serial:
             fields['port'] = self.resolved_port
@@ -408,6 +423,14 @@ class ModbusRemoteConfig(RemoteConfig):
             options.update(baudrate=self.baudrate, bytesize=self.bytesize, parity=self.parity.pymodbus,
                            stopbits=self.stopbits.value)
         return options
+
+    def listener_options(self) -> dict:
+        """Slave role: what the proxy needs to open the endpoint besides device_fields (TLS files, serial settings)."""
+        if self.transport_protocol is TransportProtocol.tls:
+            return {'cert_path': self.cert_path, 'key_path': self.key_path, 'ca_path': self.ca_path, 'client_auth': self.client_auth}
+        if self.transport_protocol is TransportProtocol.serial:
+            return {'baudrate': self.baudrate, 'bytesize': self.bytesize, 'parity': self.parity.pymodbus, 'stopbits': self.stopbits.value}
+        return {}
 
     def proxy_key(self) -> tuple:
         """Selects the proxy process. Constant by default so all Modbus devices share one."""

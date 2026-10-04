@@ -232,13 +232,16 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         for table, pads in self.pads.items():
             tables[table.value].extend({'address': pad.address, 'data_type': 'PAD', 'count': pad.count} for pad in pads)
         if self.is_server:
-            return {**self.config.device_fields(), 'tables': dict(tables), 'values': self.tree_values()}
+            return {**self.config.device_fields(), **self.config.listener_options(), 'tables': dict(tables),
+                    'values': self.tree_values()}
         return {**self.config.device_fields(), **self.config.client_options(),
                 'unit_id': self.config.unit_id, 'max_gap': self.config.max_gap, 'tables': dict(tables), 'clear_others': True}
 
     def after_registration(self, result: dict, initial_setup: bool):
         if self.is_server:
-            _log.info(f"Modbus unit {self.config.unit_id} is served on {self.config.bind_host}:{result.get('port', self.config.resolved_port)}"
+            where = (self.config.device_address if self.config.transport_protocol is TransportProtocol.serial
+                     else f"{self.config.bind_host}:{result.get('port', self.config.resolved_port)}")
+            _log.info(f"Modbus unit {self.config.unit_id} is served over {self.config.transport_protocol.value} on {where}"
                       f" by the proxy as {result.get('server')}: {result.get('configured')}.")
             return
         for table, summary in (result.get('configured') or {}).items():
@@ -384,7 +387,9 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         """Identifies the remote: one DriverAgent per Modbus unit reached, or per listener and unit served."""
         cfg = cls.INTERFACE_CONFIG_CLASS(**config.model_dump())
         if cfg.is_server:
-            return 'modbus', 'slave', cfg.bind_host, cfg.resolved_port, cfg.unit_id
+            if cfg.transport_protocol is TransportProtocol.serial:
+                return 'modbus', 'slave', 'serial', cfg.device_address, cfg.unit_id
+            return 'modbus', 'slave', cfg.transport_protocol.value, cfg.bind_host, cfg.resolved_port, cfg.unit_id
         if cfg.transport_protocol is TransportProtocol.serial:
             return cfg.transport_protocol.value, cfg.device_address, cfg.unit_id
         return cfg.transport_protocol.value, cfg.device_address, cfg.resolved_port, cfg.unit_id

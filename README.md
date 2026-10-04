@@ -163,8 +163,13 @@ platform will not poll or publish them, and they do not appear in the device's t
 
 ## Slave role
 
-With `"driver_role": "slave"` (or `server`) the device *is* a Modbus TCP unit: the proxy listens on `bind_host:port`
-and answers as `unit_id`, and the registry rows are the registers it serves.
+With `"driver_role": "slave"` (or `server`) the device *is* a Modbus unit: the proxy serves it on the endpoint named
+by `transport_protocol` and answers as `unit_id`, and the registry rows are the registers it serves. `tcp` (the
+default), `udp` and `tls` listen on `bind_host:port` (502, or 802 for `tls`; `tls` takes the server certificate
+`cert_path`/`key_path` and, with `client_auth`, the `ca_path` the masters' certificates are checked against); `serial`
+serves on the port `device_address` with the usual `baudrate`, `bytesize`, `parity` and `stopbits`. Several devices
+configured with the same endpoint and different `unit_id`s are served by one listener, as one gateway or one serial
+line would.
 
 ```json
 {
