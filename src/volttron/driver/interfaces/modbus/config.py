@@ -343,6 +343,8 @@ class ModbusRemoteConfig(RemoteConfig):
     reply_timeout: float | None = Field(default=None, gt=0)
     # How long to wait for the proxy process to start and register before declaring setup failed.
     registration_timeout: float = Field(default=30.0, gt=0)
+    persistent_connection: bool = Field(default=False, description='Keep one IPC connection to the proxy open for every'
+                                        ' request and push instead of one connection per message.')
     # Serial settings.
     baudrate: int = Field(default=9600, validation_alias=AliasChoices('baudrate', 'baud_rate'))
     bytesize: int = Field(default=8, ge=5, le=8)
