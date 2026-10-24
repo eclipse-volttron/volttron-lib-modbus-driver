@@ -44,8 +44,11 @@ def poetry_project_for_current_environment() -> str:
             continue
         direct_url = dist.read_text('direct_url.json')
         info = json.loads(direct_url) if direct_url else {}
-        if info.get('dir_info', {}).get('editable'):
-            paths.append(f'"{name}" = {{path = "{info["url"].removeprefix("file://")}", develop = true}}')
+        if 'dir_info' in info:
+            # Installed from a directory: editable (a checkout) or not (a locally built, perhaps patched, release).
+            # Pinning the latter by version would make poetry replace it with the index's copy of that version.
+            develop = 'true' if info['dir_info'].get('editable') else 'false'
+            paths.append(f'"{name}" = {{path = "{info["url"].removeprefix("file://")}", develop = {develop}}}')
         else:
             pins.append(f'"{name}" = "{dist.version}"')      # quoted: names may contain dots (backports.tarfile)
     v = sys.version_info
