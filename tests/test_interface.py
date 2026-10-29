@@ -580,6 +580,19 @@ class TestSlaveRole:
         assert prepared[0] == {**rows[0], 'data_source': 'server', 'writable': True} and prepared[1] == rows[1]
         assert iface.prepare_registry_config(rows, RemoteConfig(driver_type='modbus', device_address='h')) == rows
 
+    def test_prepare_registry_config_replaces_polling_sources_on_served_rows(self, make_interface):
+        # A registry shared with the client role says how often a master reads; a served unit has nothing to poll.
+        iface = make_interface(**SERVED)
+        rows = [{'Volttron Point Name': 'a', 'Address': 1, 'Data Type': 'uint16', 'Data Source': 'short_poll', 'Writable': 'TRUE'},
+                {'Volttron Point Name': 'sf', 'Address': 2, 'Data Type': 'int16', 'Data Source': 'poll_once', 'Writable': 'FALSE'},
+                {'Volttron Point Name': 'c', 'Address': 3, 'Data Type': 'uint16', 'data_source': 'long_poll'},
+                {'Volttron Point Name': 'n', 'Address': 4, 'Data Type': 'uint16', 'Data Source': 'never_poll', 'Writable': 'FALSE'}]
+        prepared = iface.prepare_registry_config(rows, RemoteConfig(**SERVED))
+        assert [r['data_source'] for r in prepared[:3]] == ['server'] * 3 and all('Data Source' not in r for r in prepared[:3])
+        assert prepared[0]['Writable'] == 'TRUE' and prepared[1]['Writable'] == 'FALSE' and prepared[2]['writable'] is True
+        assert prepared[3] == rows[3]
+        assert [ModbusPointConfig(**r).is_served for r in prepared] == [True, True, True, False]
+
     def test_registration_payload_describes_the_served_unit(self, make_interface, ppm):
         iface = make_interface(SERVED_POINTS, **SERVED)
         assert 'RECEIVE_WRITES' in ppm.callbacks

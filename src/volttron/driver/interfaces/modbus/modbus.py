@@ -65,6 +65,7 @@ from .config import (DriverRole, ModbusPointConfig, ModbusRemoteConfig, ROLE_ALI
                      merge_register_map, normalize_register_map)
 
 _log = logging.getLogger(__name__)
+_POLLED_SOURCES = {'short_poll', 'long_poll', 'poll_once', 'shortpoll', 'longpoll', 'pollonce'}
 
 PYTHON_TYPES = {DATATYPE.BITS: bool, DATATYPE.STRING: str, DATATYPE.FLOAT32: float, DATATYPE.FLOAT64: float}
 
@@ -204,11 +205,15 @@ class Modbus(ProxyBackedInterface, BasicRevert, BaseInterface):
         role = getattr(role, 'value', role)
         if ROLE_ALIASES.get(role, role) != DriverRole.slave.value:
             return rows
-        # Served rows default to the server data source and to being writable by the platform (they are what it serves).
+        # Served rows take the server data source and default to being writable by the platform (they are what it
+        # serves). A polling data source (a registry shared with the client role, where it says how often a master
+        # reads) means nothing to a served unit, so it is replaced; static and never_poll are kept.
         prepared = []
         for row in rows:
             row = dict(row)
-            if all(row.get(key) in (None, '') for key in ('data_source', 'Data Source')):
+            source = next((row[key] for key in ('data_source', 'Data Source') if row.get(key) not in (None, '')), None)
+            if source is None or str(getattr(source, 'value', source)).strip().lower() in _POLLED_SOURCES:
+                row.pop('Data Source', None)
                 row['data_source'] = 'server'
             if all(row.get(key) in (None, '') for key in ('writable', 'Writable')):
                 row['writable'] = True
