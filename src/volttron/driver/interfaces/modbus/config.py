@@ -1,4 +1,6 @@
-"""Configuration models for the Modbus driver interface."""
+"""Configuration models for the Modbus driver interface: one registry row and one remote, which is either a device this
+driver reaches as a master (``driver_role: master``, the default) or a Modbus TCP unit this driver serves to a remote
+master (``driver_role: slave``)."""
 import logging
 
 from enum import Enum
@@ -6,9 +8,18 @@ from typing import Any
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 
-from volttron.driver.base.config import PointConfig, RemoteConfig
+from volttron.driver.base.config import DataSource, PointConfig, RemoteConfig
 
 _log = logging.getLogger(__name__)
+
+
+class DriverRole(str, Enum):
+    """Which side of Modbus this remote is. ``client``, ``server`` and ``outstation`` are accepted spellings."""
+    master = 'master'
+    slave = 'slave'
+
+
+ROLE_ALIASES = {'client': 'master', 'server': 'slave', 'outstation': 'slave'}
 
 
 class Table(str, Enum):
@@ -233,7 +244,7 @@ class ModbusPointConfig(PointConfig):
             if isinstance(data_type, str) and is_pad_type(data_type):
                 overridden = ('active', 'data_source', 'Data Source', 'writable', 'Writable')
                 data = {**{k: v for k, v in data.items() if k not in overridden},
-                        'active': False, 'data_source': 'never', 'writable': False}
+                        'active': False, 'data_source': 'never_poll', 'writable': False}
         return data
 
     @model_validator(mode='before')
@@ -286,39 +297,132 @@ class ModbusPointConfig(PointConfig):
     def is_pad(self) -> bool:
         return is_pad_type(self.data_type)
 
+    @property
+    def is_served(self) -> bool:
+        """A served point (``data_source: server``) of a unit this driver serves."""
+        return self.data_source is DataSource.SERVER
+
+    def resolved_remote_writable(self, table: Table) -> bool:
+        """Whether a remote master may write this served point: as configured, else when its table is writable."""
+        return self.remote_writable if self.remote_writable is not None else not table.read_only
+
 
 class ModbusRemoteConfig(RemoteConfig):
+    driver_role: DriverRole = Field(default=DriverRole.master,
+                                    description='master reaches a unit; slave serves the registry as a unit of its '
+                                                'own.',
+                                    json_schema_extra={'group': 'Device', 'order': 20})
     transport_protocol: TransportProtocol = Field(default=TransportProtocol.tcp,
-                                                  validation_alias=AliasChoices('transport_protocol', 'transport'))
-    device_address: str
+                                                  validation_alias=AliasChoices('transport_protocol', 'transport'),
+                                                  description='tcp, udp, tls or serial.',
+                                                  json_schema_extra={'group': 'Connection', 'order': 10})
+    # Master role: the device (or gateway) to reach, or the serial port. Slave role over serial: the serial port to
+    # serve on. Required in both of those cases.
+    device_address: str | None = Field(default=None,
+                                       description='Master: the device or gateway to reach, or the serial port. Slave '
+                                                   'over serial: the port to serve on.',
+                                       json_schema_extra={'group': 'Connection', 'order': 20})
+    # Slave role over tcp, udp or tls: the interface to listen on.
+    bind_host: str = Field(default='0.0.0.0', validation_alias=AliasChoices('bind_host', 'listen_host'),
+                           description='Slave over tcp, udp or tls: the interface to listen on.',
+                           json_schema_extra={'group': 'Connection',
+                                              'show_when': {'driver_role': ['server', 'slave', 'outstation']},
+                                              'order': 50})
+    # TLS. Master role: ca_path verifies the server (the system CAs when blank; tls_verify false skips the check),
+    # cert_path/key_path is this master's certificate for servers that require client authentication. Slave role: the
+    # server certificate and key, and the CA that signed the masters' certificates when client_auth is on.
+    cert_path: str | None = Field(default=None, validation_alias=AliasChoices('cert_path', 'certfile', 'cert'),
+                                  description="Master: this master's certificate for servers requiring client "
+                                              'authentication. Slave: the server certificate.',
+                                  json_schema_extra={'group': 'TLS', 'advanced': True,
+                                                     'show_when': {'transport_protocol': 'tls'}, 'order': 110})
+    key_path: str | None = Field(default=None, validation_alias=AliasChoices('key_path', 'keyfile', 'key'),
+                                 json_schema_extra={'group': 'TLS', 'advanced': True,
+                                                    'show_when': {'transport_protocol': 'tls'}, 'order': 120})
+    ca_path: str | None = Field(default=None, validation_alias=AliasChoices('ca_path', 'cafile', 'ca'),
+                                description='Master: the CA that verifies the server (system CAs when blank). Slave: '
+                                            "the CA that signed the masters' certificates.",
+                                json_schema_extra={'group': 'TLS', 'advanced': True,
+                                                   'show_when': {'transport_protocol': 'tls'}, 'order': 130})
+    tls_verify: bool = Field(default=True,
+                             json_schema_extra={'group': 'TLS', 'advanced': True,
+                                                'show_when': {'transport_protocol': 'tls'}, 'order': 140})
+    client_auth: bool = Field(default=False, description='Slave: require masters to present a certificate.',
+                              json_schema_extra={'group': 'TLS', 'advanced': True,
+                                                 'show_when': {'transport_protocol': 'tls'}, 'order': 150})
+    # Serial: whether the adapter echoes what the master sends (half-duplex RS-485 adapters without echo suppression).
+    handle_local_echo: bool = Field(default=False,
+                                    description='Whether the adapter echoes what the master sends (half-duplex RS-485 '
+                                                'without echo suppression).',
+                                    json_schema_extra={'group': 'Serial', 'advanced': True,
+                                                       'show_when': {'transport_protocol': 'serial'}, 'order': 200})
     # None resolves to 802 for TLS and 502 otherwise. Ignored for serial.
-    port: int | None = None
-    unit_id: int = Field(default=1, validation_alias=AliasChoices('unit_id', 'device_id', 'slave_id'))
-    addressing: Addressing = Field(default=Addressing.offset)
+    port: int | None = Field(default=None,
+                             description='Blank resolves to 802 for TLS and 502 otherwise; ignored for serial.',
+                             json_schema_extra={'group': 'Connection', 'order': 30})
+    unit_id: int = Field(default=1, validation_alias=AliasChoices('unit_id', 'device_id', 'slave_id'),
+                         description='The Modbus unit (slave) identifier.',
+                         json_schema_extra={'group': 'Connection', 'order': 40})
+    addressing: Addressing = Field(default=Addressing.offset,
+                                   description='How registry addresses are counted: offset (0-based), address '
+                                               '(1-based) or offset_plus.',
+                                   json_schema_extra={'group': 'Protocol and timing', 'order': 60})
     # Default word order for multi-register values; a point may override it.
-    word_order: WordOrder = Field(default=WordOrder.big, validation_alias=AliasChoices('word_order', 'endian'))
+    word_order: WordOrder = Field(default=WordOrder.big, validation_alias=AliasChoices('word_order', 'endian'),
+                                  description='Default word order for multi-register values; a point may override it.',
+                                  json_schema_extra={'group': 'Protocol and timing', 'order': 70})
     # Largest run of unconfigured registers the proxy may read through to merge two requests into one.
-    max_gap: int = Field(default=0, ge=0)
+    max_gap: int = Field(default=0, ge=0,
+                         description='Largest run of unconfigured registers the proxy may read through to merge two '
+                                     'requests into one.',
+                         json_schema_extra={'group': 'Protocol and timing', 'order': 100})
     # Device timeout: how long the proxy waits for the device to answer one request before retrying.
-    timeout: float = Field(default=3.0, gt=0)
-    retries: int = Field(default=3, ge=0)
+    timeout: float = Field(default=3.0, gt=0,
+                           description='How long the proxy waits for the device to answer one request before retrying.',
+                           json_schema_extra={'group': 'Protocol and timing', 'unit': 's', 'order': 80})
+    retries: int = Field(default=3, ge=0, json_schema_extra={'group': 'Protocol and timing', 'order': 90})
     # How long to wait for the proxy's reply to a read or write. Must exceed the device timeout: behind a shared
     # gateway a request queues until the other units' requests (including their timeout-and-retry cycles) finish.
     # Defaults to three full timeout-and-retry cycles, and at least 30 seconds.
-    reply_timeout: float | None = Field(default=None, gt=0)
+    reply_timeout: float | None = Field(default=None, gt=0,
+                                        description="How long to wait for the proxy's reply to a read or write; "
+                                                    'defaults to three timeout-and-retry cycles, at least 30 s.',
+                                        json_schema_extra={'group': 'Proxy', 'advanced': True, 'unit': 's',
+                                                           'order': 210})
     # How long to wait for the proxy process to start and register before declaring setup failed.
-    registration_timeout: float = Field(default=30.0, gt=0)
+    registration_timeout: float = Field(default=30.0, gt=0,
+                                        description='How long to wait for the proxy process to start and register '
+                                                    'before declaring setup failed.',
+                                        json_schema_extra={'group': 'Proxy', 'advanced': True, 'unit': 's',
+                                                           'order': 220})
+    persistent_connection: bool = Field(default=True, description='Keep one IPC connection to the proxy open for every'
+                                        ' request and push instead of one connection per message.',
+                                        json_schema_extra={'group': 'Proxy', 'advanced': True, 'order': 230})
     # Serial settings.
-    baudrate: int = Field(default=9600, validation_alias=AliasChoices('baudrate', 'baud_rate'))
-    bytesize: int = Field(default=8, ge=5, le=8)
-    parity: Parity = Field(default=Parity.none)
-    stopbits: StopBits = Field(default=StopBits.one, validation_alias=AliasChoices('stopbits', 'stop_bits'))
+    baudrate: int = Field(default=9600, validation_alias=AliasChoices('baudrate', 'baud_rate'),
+                          json_schema_extra={'group': 'Serial', 'advanced': True,
+                                             'show_when': {'transport_protocol': 'serial'}, 'order': 160})
+    bytesize: int = Field(default=8, ge=5, le=8,
+                          json_schema_extra={'group': 'Serial', 'advanced': True,
+                                             'show_when': {'transport_protocol': 'serial'}, 'order': 170})
+    parity: Parity = Field(default=Parity.none,
+                           json_schema_extra={'group': 'Serial', 'advanced': True,
+                                              'show_when': {'transport_protocol': 'serial'}, 'order': 180})
+    stopbits: StopBits = Field(default=StopBits.one, validation_alias=AliasChoices('stopbits', 'stop_bits'),
+                               json_schema_extra={'group': 'Serial', 'advanced': True,
+                                                  'show_when': {'transport_protocol': 'serial'}, 'order': 190})
     # All Modbus devices share one proxy process unless a group is named here.
-    proxy_group: str | None = None
+    proxy_group: str | None = Field(default=None,
+                                    description='All Modbus devices share one proxy process unless a group is named '
+                                                'here.',
+                                    json_schema_extra={'group': 'Proxy', 'advanced': True, 'order': 240})
     # Optional modbus_tk-style register map (normally a config:// reference to a CSV, resolved to its rows by the
     # configuration store). Registry rows lacking an address or data type are completed from the map row with the
     # same Register Name; see merge_register_map. Never required when the registry is complete on its own.
-    register_map: list[dict] | None = None
+    register_map: list[dict] | None = Field(default=None,
+                                            description='Optional modbus_tk-style register map (a config:// CSV) that '
+                                                        'completes registry rows lacking an address or data type.',
+                                            json_schema_extra={'group': 'Proxy', 'advanced': True, 'order': 250})
 
     @field_validator('register_map', mode='before')
     @classmethod
@@ -330,6 +434,29 @@ class ModbusRemoteConfig(RemoteConfig):
     def _normalize_addressing(cls, v):
         v = _lower_or_none(v)
         return 'offset' if v in (None, 'exact') else v
+
+    @field_validator('driver_role', mode='before')
+    @classmethod
+    def _role(cls, v):
+        if isinstance(v, str):
+            v = v.lower().strip() or 'master'
+            return ROLE_ALIASES.get(v, v)
+        return DriverRole.master if v is None else v
+
+    @model_validator(mode='after')
+    def _check_role_fields(self):
+        if self.driver_role is DriverRole.master and not self.device_address:
+            raise ValueError('A Modbus master needs the device_address of the device or gateway to reach.')
+        if self.driver_role is DriverRole.slave:
+            if self.transport_protocol is TransportProtocol.serial and not self.device_address:
+                raise ValueError('A Modbus unit served over serial needs the device_address of the serial port.')
+            if self.transport_protocol is TransportProtocol.tls and (not self.cert_path or not self.key_path):
+                raise ValueError('A Modbus unit served over TLS needs cert_path and key_path (its server certificate).')
+        return self
+
+    @property
+    def is_server(self) -> bool:
+        return self.driver_role is DriverRole.slave
 
     @field_validator('parity', 'word_order', 'transport_protocol', mode='before')
     @classmethod
@@ -349,19 +476,36 @@ class ModbusRemoteConfig(RemoteConfig):
         return 802 if self.transport_protocol is TransportProtocol.tls else 502
 
     def device_fields(self) -> dict:
-        """The fields every proxy message uses to identify this device's client."""
-        fields = {'device_address': self.device_address, 'device_type': self.transport_protocol.value}
+        """What identifies the remote to the proxy: the device to reach, or the endpoint and unit to serve."""
+        if self.is_server:
+            fields = {'role': 'slave', 'transport_protocol': self.transport_protocol.value, 'unit_id': self.unit_id}
+            if self.transport_protocol is TransportProtocol.serial:
+                fields['device_address'] = self.device_address
+            else:
+                fields.update(bind_host=self.bind_host, port=self.resolved_port)
+            return fields
+        fields = {'role': 'master', 'device_address': self.device_address, 'device_type': self.transport_protocol.value}
         if self.transport_protocol is not TransportProtocol.serial:
             fields['port'] = self.resolved_port
         return fields
 
     def client_options(self) -> dict:
-        """pymodbus client settings for REGISTER_DEVICE."""
+        """pymodbus client settings sent with the master role's registration."""
         options = {'timeout': self.timeout, 'retries': self.retries}
         if self.transport_protocol is TransportProtocol.serial:
             options.update(baudrate=self.baudrate, bytesize=self.bytesize, parity=self.parity.pymodbus,
-                           stopbits=self.stopbits.value)
+                           stopbits=self.stopbits.value, handle_local_echo=self.handle_local_echo)
+        elif self.transport_protocol is TransportProtocol.tls:
+            options.update(ca_path=self.ca_path, cert_path=self.cert_path, key_path=self.key_path, tls_verify=self.tls_verify)
         return options
+
+    def listener_options(self) -> dict:
+        """Slave role: what the proxy needs to open the endpoint besides device_fields (TLS files, serial settings)."""
+        if self.transport_protocol is TransportProtocol.tls:
+            return {'cert_path': self.cert_path, 'key_path': self.key_path, 'ca_path': self.ca_path, 'client_auth': self.client_auth}
+        if self.transport_protocol is TransportProtocol.serial:
+            return {'baudrate': self.baudrate, 'bytesize': self.bytesize, 'parity': self.parity.pymodbus, 'stopbits': self.stopbits.value}
+        return {}
 
     def proxy_key(self) -> tuple:
         """Selects the proxy process. Constant by default so all Modbus devices share one."""

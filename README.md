@@ -161,6 +161,55 @@ A row whose data type is `pad` (or `pad[n]`) declares registers to read but neve
 between points so that they are fetched in one request. Pad rows must name their `Table`. They are not points: the
 platform will not poll or publish them, and they do not appear in the device's topics.
 
+## Slave role
+
+With `"driver_role": "slave"` (or `server`) the device *is* a Modbus unit: the proxy serves it on the endpoint named
+by `transport_protocol` and answers as `unit_id`, and the registry rows are the registers it serves. `tcp` (the
+default), `udp` and `tls` listen on `bind_host:port` (502, or 802 for `tls`; `tls` takes the server certificate
+`cert_path`/`key_path` and, with `client_auth`, the `ca_path` the masters' certificates are checked against); `serial`
+serves on the port `device_address` with the usual `baudrate`, `bytesize`, `parity` and `stopbits`. Several devices
+configured with the same endpoint and different `unit_id`s are served by one listener, as one gateway or one serial
+line would.
+
+```json
+{
+    "remote_config": {
+        "driver_type": "modbus",
+        "driver_role": "slave",
+        "bind_host": "0.0.0.0",
+        "port": 502,
+        "unit_id": 1
+    },
+    "registry_config": "config://served.csv"
+}
+```
+
+```csv
+Volttron Point Name,Address,Data Type,Units,Writable,Remote Writable,Table,Starting Value
+ReturnAirCO2,1001,>f,PPM,TRUE,,,412.5
+CO2Stpt,1003,>f,PPM,TRUE,TRUE,,1000
+Name,1005,string[6],,TRUE,FALSE,holding,Rtu-1
+FanStatus,3,bool,,TRUE,,,TRUE
+FanCmd,5,bool,,TRUE,TRUE,,FALSE
+```
+
+* Rows default to `Data Source` `server` and `Writable` TRUE (`prepare_registry_config`): served points are never polled
+  and the platform may set any of them, inputs included (they are the telemetry the unit serves). `set_point` stores the
+  value in the register and the interface reflects it into the equipment tree and publishes it at once; `revert`
+  restores `Starting Value`.
+* `Remote Writable` says which points the master may write. Blank means no: a point goes to the input or discrete-input
+  table unless it is remote-writable, in which case it goes to the holding or coil table (an explicit `Table` wins).
+  Writes from the master to other points, to pads or to unregistered registers are refused with ILLEGAL DATA ADDRESS.
+* The master's accepted writes are decoded and pushed to this interface, which publishes them like a change of value
+  and records them as the points' last values.
+* Restarts: on every (re)registration the interface sends the equipment tree's current values with the register table;
+  a relaunched proxy takes them ahead of the starting values and pushes its whole table back. The proxy manager
+  relaunches a proxy that dies, so a proxy crash costs nothing but the pause. Across a platform driver restart the served
+  values come from the agent's configuration store (`state/<device topic>`, see the platform driver's documentation).
+
+`tests/e2e_server_harness.py` runs this role end to end: a served unit and a master-role interface through one real proxy
+process, including a proxy crash.
+
 ## Requests per poll
 
 When the device registers with the proxy, the driver logs, per table, how many points and pads were configured and

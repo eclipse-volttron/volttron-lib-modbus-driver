@@ -27,8 +27,8 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
-protocol-proxy-modbus = ">=2.0.0rc0"
-volttron-lib-base-driver = ">=2.0.0rc6"
+protocol-proxy-modbus = ">=2.0.0rc1"
+volttron-lib-base-driver = ">=2.0.0rc7"
 
 [tool.poetry.group.dev.dependencies]
 #volttron-testing = "^0.3.1a7"

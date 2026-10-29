@@ -48,7 +48,7 @@ import collections
 import logging
 import math
 import struct
-from datetime import datetime
+from datetime import datetime, timezone
 
 import modbus_tk.defines as modbus_constants
 import modbus_tk.modbus_rtu as modbus_rtu
@@ -271,7 +271,7 @@ class Field:
         :return: Field value from modbus client.
         """
         datum = instance.get_data(self)
-        if datum is None or (datetime.utcnow() -
+        if datum is None or (datetime.now(timezone.utc) -
                              datum.timestamp).total_seconds() * 1000 >= instance.latency:
             instance.fetch_field(self)
             datum = instance.get_data(self)
@@ -463,7 +463,7 @@ class Request:
         :param results: unpacked results from modbus_tk execute()
         :return: a dictionary of {field_name: value, ...}
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         field_values = {}
         if len(self.fields) == 1 and self.fields[0].is_array_field:
             field = self.fields[0]
